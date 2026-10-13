@@ -11,6 +11,7 @@ from memecp.generator import (
     create_classic_meme,
     create_demotivator,
     create_post_ironic_meme,
+    create_caption_meme,
     create_news_meme,
     list_available_fonts,
     load_image,
@@ -35,11 +36,13 @@ class TestMemeGenerator(unittest.TestCase):
         self.assertIn("sans", fonts)
         self.assertIn("lobster", fonts)
         self.assertIn("oswald", fonts)
+        self.assertIn("futura", fonts)
+        self.assertIn("caption", fonts)
 
     def test_resolve_font_path(self):
         p = resolve_font_path("impact")
         self.assertTrue(p.exists())
-        self.assertTrue(p.name.endswith(".ttf"))
+        self.assertTrue(p.name.endswith((".ttf", ".otf")))
 
     def test_load_image_local(self):
         img = load_image(str(self.sample_img_path))
@@ -83,6 +86,18 @@ class TestMemeGenerator(unittest.TestCase):
         self.assertGreater(res["width"], 600)
         self.assertGreater(res["height"], 400)
 
+    def test_create_caption_meme(self):
+        out_file = self.tmp_dir / "caption.jpg"
+        res = create_caption_meme(
+            image_source=str(self.sample_img_path),
+            caption="violence",
+            output_path=str(out_file),
+        )
+        self.assertTrue(res["success"])
+        self.assertTrue(Path(res["path"]).exists())
+        self.assertEqual(res["width"], 600)
+        self.assertGreater(res["height"], 400)
+
     def test_create_post_ironic_caption_box(self):
         out_file = self.tmp_dir / "caption_box.jpg"
         res = create_post_ironic_meme(
@@ -116,6 +131,21 @@ class TestMemeGenerator(unittest.TestCase):
         )
         self.assertTrue(res["success"])
         self.assertTrue(Path(res["path"]).exists())
+        self.assertEqual(res["width"], 600)
+        self.assertEqual(res["height"], 400)
+
+    def test_create_news_meme_long_headline(self):
+        out_file = self.tmp_dir / "news_long.jpg"
+        res = create_news_meme(
+            image_source=str(self.sample_img_path),
+            headline="Голубь официально признан ведущим системным инженером компании после успешного деплоя всей инфраструктуры",
+            category="⚡ СРОЧНО",
+            output_path=str(out_file),
+        )
+        self.assertTrue(res["success"])
+        self.assertTrue(Path(res["path"]).exists())
+        self.assertEqual(res["width"], 600)
+        self.assertEqual(res["height"], 400)
 
 
 if __name__ == "__main__":

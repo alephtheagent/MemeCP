@@ -43,3 +43,10 @@ htmlcov/
 .vscode/
 *.swp
 *.swo
+
+# Fonts (downloaded on-demand, excluded from repo for DMCA compliance)
+*.ttf
+*.otf
+src/memecp/assets/*.ttf
+src/memecp/assets/*.otf
+

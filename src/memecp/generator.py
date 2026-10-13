@@ -1,4 +1,4 @@
-"""Meme generation engine supporting classic, demotivator, post-ironic, and news styles."""
+"""Meme generation engine supporting classic, demotivator, post-ironic, caption, and news styles."""
 
 from __future__ import annotations
 
@@ -15,9 +15,14 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageFilter
 
 ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 DEFAULT_CACHE_DIR = Path("~/.hermes/cache/memes").expanduser()
+DEFAULT_FONT_CACHE_DIR = Path("~/.cache/memecp/fonts").expanduser()
 
 FONT_ALIASES: dict[str, str] = {
     "impact": "impact.ttf",
+    "futura": "futura_condensed.otf",
+    "caption": "futura_condensed.otf",
+    "esmbot": "futura_condensed.otf",
+    "ifunny": "futura_condensed.otf",
     "lobster": "lobster.ttf",
     "oswald": "oswald.ttf",
     "serif": "serif.ttf",
@@ -28,18 +33,79 @@ FONT_ALIASES: dict[str, str] = {
     "helvetica": "sans.ttf",
 }
 
+SYSTEM_FONTS: dict[str, str] = {
+    "sans.ttf": "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "serif.ttf": "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+}
+
+FONT_DOWNLOAD_URLS: dict[str, list[str]] = {
+    "impact.ttf": [
+        "https://raw.githubusercontent.com/justrajdeep/fonts/master/Impact.ttf",
+    ],
+    "futura_condensed.otf": [
+        "https://raw.githubusercontent.com/Kyles-World/Futura-Font/main/Futura%20PT%20(ParaType)/FuturaPTCond-Bold.otf",
+    ],
+    "caption.otf": [
+        "https://raw.githubusercontent.com/esmBot/esmBot/master/assets/fonts/caption.otf",
+    ],
+    "lobster.ttf": [
+        "https://raw.githubusercontent.com/google/fonts/main/ofl/lobster/Lobster-Regular.ttf",
+    ],
+    "oswald.ttf": [
+        "https://raw.githubusercontent.com/google/fonts/main/ofl/oswald/Oswald%5Bwght%5D.ttf",
+    ],
+    "serif.ttf": [
+        "https://raw.githubusercontent.com/google/fonts/main/ofl/notoserif/NotoSerif%5Bwdth%2Cwght%5D.ttf",
+    ],
+    "sans.ttf": [
+        "https://raw.githubusercontent.com/HikiNarou/DejavuSans-TTF/master/DejaVuSans-Bold.ttf",
+        "https://raw.githubusercontent.com/google/fonts/main/ofl/notosans/NotoSans%5Bwdth%2Cwght%5D.ttf",
+    ],
+}
+
 
 def list_available_fonts() -> list[str]:
     """Return a list of available built-in font identifiers."""
     names = set(FONT_ALIASES.keys())
+    if DEFAULT_FONT_CACHE_DIR.exists():
+        for p in DEFAULT_FONT_CACHE_DIR.glob("*.*"):
+            if p.suffix.lower() in (".ttf", ".otf"):
+                names.add(p.stem.lower())
     if ASSETS_DIR.exists():
-        for p in ASSETS_DIR.glob("*.ttf"):
-            names.add(p.stem.lower())
+        for p in ASSETS_DIR.glob("*.*"):
+            if p.suffix.lower() in (".ttf", ".otf"):
+                names.add(p.stem.lower())
     return sorted(names)
 
 
+def download_font(target_filename: str) -> Path | None:
+    """Download a required font on demand into local cache directory."""
+    urls = FONT_DOWNLOAD_URLS.get(target_filename, [])
+    if not urls:
+        return None
+
+    DEFAULT_FONT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    target_path = DEFAULT_FONT_CACHE_DIR / target_filename
+
+    for url in urls:
+        try:
+            with httpx.Client(timeout=20.0, follow_redirects=True) as client:
+                resp = client.get(url)
+                if resp.status_code == 200 and len(resp.content) > 1000:
+                    target_path.write_bytes(resp.content)
+                    # Verify font validity
+                    ImageFont.truetype(str(target_path), 20)
+                    return target_path
+        except Exception:
+            continue
+    return None
+
+
 def resolve_font_path(font_name_or_path: str) -> Path:
-    """Resolve a font name alias, asset filename, or custom filesystem path."""
+    """
+    Resolve a font alias, local file path, or download on demand.
+    Keeps repository clean and DMCA-safe.
+    """
     # 1. Direct path check
     direct = Path(font_name_or_path).expanduser()
     if direct.exists() and direct.is_file():
@@ -47,33 +113,67 @@ def resolve_font_path(font_name_or_path: str) -> Path:
 
     # 2. Alias lookup
     normalized = font_name_or_path.strip().lower()
-    if normalized in FONT_ALIASES:
-        asset_file = ASSETS_DIR / FONT_ALIASES[normalized]
-        if asset_file.exists():
-            return asset_file
+    filename = FONT_ALIASES.get(normalized, normalized)
+    if not filename.endswith((".ttf", ".otf")):
+        filename = f"{filename}.ttf"
 
-    # 3. Assets directory match by name
-    for ext in (".ttf", ".otf"):
-        candidate = ASSETS_DIR / f"{normalized}{ext}"
-        if candidate.exists():
-            return candidate
+    # 3. Cache directory check (~/.cache/memecp/fonts/)
+    cached_path = DEFAULT_FONT_CACHE_DIR / filename
+    if cached_path.exists() and cached_path.is_file() and cached_path.stat().st_size > 1000:
+        return cached_path
 
-    # 4. Fallback to bundled impact.ttf or sans.ttf
-    fallback = ASSETS_DIR / "impact.ttf"
-    if fallback.exists():
-        return fallback
+    # 4. In-repo assets directory check (if present locally)
+    asset_file = ASSETS_DIR / filename
+    if asset_file.exists() and asset_file.is_file() and asset_file.stat().st_size > 1000:
+        return asset_file
 
-    fallback_sans = ASSETS_DIR / "sans.ttf"
-    if fallback_sans.exists():
-        return fallback_sans
+    # 5. Host system font check
+    if filename in SYSTEM_FONTS:
+        sys_path = Path(SYSTEM_FONTS[filename])
+        if sys_path.exists() and sys_path.is_file():
+            return sys_path
 
-    raise FileNotFoundError(f"Could not resolve font '{font_name_or_path}' and no bundled fallback found.")
+    # 6. On-demand download
+    downloaded = download_font(filename)
+    if downloaded and downloaded.exists():
+        return downloaded
+
+    # 7. Fallback search across available cached fonts or system fonts
+    for fallback_file in ("impact.ttf", "futura_condensed.otf", "sans.ttf", "serif.ttf"):
+        fc = DEFAULT_FONT_CACHE_DIR / fallback_file
+        if fc.exists() and fc.is_file() and fc.stat().st_size > 1000:
+            return fc
+        fa = ASSETS_DIR / fallback_file
+        if fa.exists() and fa.is_file() and fa.stat().st_size > 1000:
+            return fa
+
+    for sys_fallback in SYSTEM_FONTS.values():
+        sp = Path(sys_fallback)
+        if sp.exists() and sp.is_file():
+            return sp
+
+    raise FileNotFoundError(f"Could not resolve font '{font_name_or_path}' and all fallbacks failed.")
 
 
 def load_font(font_name_or_path: str, size: int) -> ImageFont.FreeTypeFont:
-    """Load a truetype font at the specified size."""
-    font_path = resolve_font_path(font_name_or_path)
-    return ImageFont.truetype(str(font_path), max(10, int(size)))
+    """Load a truetype/opentype font at the specified size with on-demand retrieval."""
+    try:
+        font_path = resolve_font_path(font_name_or_path)
+        return ImageFont.truetype(str(font_path), max(10, int(size)))
+    except Exception:
+        # Graceful fallback to any working font or Pillow default
+        for candidate in [
+            DEFAULT_FONT_CACHE_DIR / "sans.ttf",
+            DEFAULT_FONT_CACHE_DIR / "impact.ttf",
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+        ]:
+            if candidate.exists() and candidate.is_file():
+                try:
+                    return ImageFont.truetype(str(candidate), max(10, int(size)))
+                except Exception:
+                    continue
+        return ImageFont.load_default()
 
 
 def load_image(image_source: str, max_dimension: int = 1920) -> Image.Image:
@@ -125,7 +225,7 @@ def resolve_output_path(output_path: str | None, prefix: str = "meme") -> Path:
     DEFAULT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     rand_id = uuid.uuid4().hex[:8]
-    return DEFAULT_CACHE_DIR / f"{prefix}_{ts}_{rand_id}.jpg"
+    return DEFAULT_CACHE_DIR / f"{prefix}_{ts}_{rand_id}.jpg prevail" if False else DEFAULT_CACHE_DIR / f"{prefix}_{ts}_{rand_id}.jpg"
 
 
 def wrap_text_to_width(text: str, font: ImageFont.FreeTypeFont, max_width: int, draw: ImageDraw.ImageDraw) -> list[str]:
@@ -182,7 +282,6 @@ def calculate_multiline_box(lines: list[str], font: ImageFont.FreeTypeFont, draw
     total_h = 0
     for i, line in enumerate(lines):
         if not line:
-            # Empty line height
             bbox = draw.textbbox((0, 0), "A", font=font)
             h = bbox[3] - bbox[1]
         else:
@@ -380,7 +479,6 @@ def create_demotivator(
 
     canvas = Image.new("RGB", (canvas_w, canvas_h), (0, 0, 0))
     canvas.paste(img, (margin_x, margin_top))
-
     draw = ImageDraw.Draw(canvas)
 
     # Thin white border around image (offset by 4px)
@@ -423,6 +521,80 @@ def create_demotivator(
     }
 
 
+def create_caption_meme(
+    image_source: str,
+    caption: str,
+    font_name: str = "futura",
+    output_path: str | None = None,
+) -> dict[str, Any]:
+    """
+    Generate an esmBot / Discord / iFunny style white header caption box meme:
+    - Pure white rectangular header box placed above the image
+    - Bold geometric sans typography (Futura Condensed Bold / Extra Bold)
+    - Perfectly centered horizontally and vertically
+    - Clean proportional padding
+    """
+    img = load_image(image_source)
+    w, h = img.size
+
+    # Prominent geometric font sizing
+    base_font_size = max(24, int(w * 0.072))
+    min_font_size = max(14, int(w * 0.032))
+    pad_x = max(18, int(w * 0.04))
+    max_box_text_w = w - 2 * pad_x
+    max_box_h = int(h * 0.50)
+
+    temp_img = Image.new("RGB", (100, 100))
+    temp_draw = ImageDraw.Draw(temp_img)
+
+    selected_font = None
+    selected_lines: list[str] = []
+    selected_spacing = 0
+
+    # Auto-scale font down if caption is long
+    for size in range(base_font_size, min_font_size - 1, -2):
+        f = load_font(font_name, size)
+        lines = wrap_text_to_width(caption, f, max_box_text_w, temp_draw)
+        spacing = max(3, int(size * 0.15))
+        _, text_h = calculate_multiline_box(lines, f, temp_draw, spacing)
+        pad_y = max(14, int(size * 0.42))
+        if text_h + 2 * pad_y <= max_box_h and len(lines) <= 4:
+            selected_font = f
+            selected_lines = lines
+            selected_spacing = spacing
+            break
+
+    if not selected_font:
+        selected_font = load_font(font_name, min_font_size)
+        selected_spacing = max(3, int(min_font_size * 0.15))
+        selected_lines = wrap_text_to_width(caption, selected_font, max_box_text_w, temp_draw)
+
+    _, text_h = calculate_multiline_box(selected_lines, selected_font, temp_draw, selected_spacing)
+    pad_y = max(14, int(selected_font.size * 0.42))
+    box_h = text_h + 2 * pad_y
+
+    canvas = Image.new("RGB", (w, h + box_h), (255, 255, 255))
+    canvas.paste(img, (0, box_h))
+
+    draw = ImageDraw.Draw(canvas)
+    cur_y = pad_y
+    for line in selected_lines:
+        if line:
+            draw.text((w / 2, cur_y), line, font=selected_font, fill=(0, 0, 0), anchor="ma")
+        bbox = draw.textbbox((0, 0), line or "A", font=selected_font)
+        cur_y += (bbox[3] - bbox[1]) + selected_spacing
+
+    destination = resolve_output_path(output_path, prefix="caption")
+    canvas.save(destination, quality=95)
+
+    return {
+        "success": True,
+        "path": str(destination),
+        "width": canvas.width,
+        "height": canvas.height,
+    }
+
+
 def create_post_ironic_meme(
     image_source: str,
     caption: str,
@@ -431,7 +603,7 @@ def create_post_ironic_meme(
 ) -> dict[str, Any]:
     """
     Generate post-ironic and modern meme styles:
-    - 'caption_box': White rectangular header box above image (iFunny / Telegram format).
+    - 'caption_box': White rectangular header box above image (esmBot / iFunny format).
     - 'deep_fry': Nuked meme with hyper-saturation, sharpness, contrast, and JPEG compression artifacts.
     - 'bottom_ticker': Breaking news ticker overlay at the bottom.
     """
@@ -439,33 +611,8 @@ def create_post_ironic_meme(
     w, h = img.size
     norm_style = style.strip().lower()
 
-    if norm_style in ("caption_box", "top_box", "ifunny"):
-        # White header box on top
-        font_size = max(22, int(w * 0.052))
-        pad_x = max(20, int(w * 0.04))
-        pad_y = max(18, int(h * 0.035))
-        max_box_text_w = w - 2 * pad_x
-
-        temp_img = Image.new("RGB", (100, 100))
-        temp_draw = ImageDraw.Draw(temp_img)
-        font = load_font("sans", font_size)
-        lines = wrap_text_to_width(caption, font, max_box_text_w, temp_draw)
-        line_spacing = int(font.size * 0.2)
-        _, text_h = calculate_multiline_box(lines, font, temp_draw, line_spacing)
-
-        box_h = text_h + 2 * pad_y
-        canvas = Image.new("RGB", (w, h + box_h), (255, 255, 255))
-        canvas.paste(img, (0, box_h))
-
-        draw = ImageDraw.Draw(canvas)
-        cur_y = pad_y
-        for line in lines:
-            if line:
-                draw.text((pad_x, cur_y), line, font=font, fill=(0, 0, 0))
-            bbox = draw.textbbox((0, 0), line or "A", font=font)
-            cur_y += (bbox[3] - bbox[1]) + line_spacing
-
-        result_img = canvas
+    if norm_style in ("caption_box", "top_box", "ifunny", "esmbot", "caption"):
+        return create_caption_meme(image_source=image_source, caption=caption, output_path=output_path)
 
     elif norm_style in ("bottom_ticker", "news_ticker", "breaking_news"):
         return create_news_meme(image_source=image_source, headline=caption, output_path=output_path)
@@ -533,48 +680,105 @@ def create_news_meme(
     output_path: str | None = None,
 ) -> dict[str, Any]:
     """
-    Generate a breaking news ticker overlay on bottom of the image.
+    Generate a breaking news broadcast ticker overlay on the bottom of the image.
+    Uses two-tier TV lower-third layout with dynamic font scaling and multiline spacing:
+    - Tier 1: Red category strip with category badge and live broadcast indicator
+    - Tier 2: Dark lower-third bar sized dynamically to fit all headline lines without clipping
     """
     img = load_image(image_source)
     w, h = img.size
 
-    # Ticker bar dimensions
-    bar_h = max(70, int(h * 0.16))
-    bar_y = h - bar_h
-
     draw = ImageDraw.Draw(img)
 
-    # Dark translucent/solid lower banner
-    draw.rectangle([0, bar_y, w, h], fill=(20, 20, 25))
-
-    # Category badge on top of ticker (e.g. red BREAKING NEWS badge)
-    badge_h = max(24, int(bar_h * 0.36))
-    badge_font_size = max(13, int(badge_h * 0.65))
+    # Tier 1: Top Category Strip
+    badge_font_size = max(14, int(w * 0.024))
     badge_font = load_font("sans", badge_font_size)
+    strip_h = max(28, int(badge_font_size * 1.75))
 
-    badge_bbox = draw.textbbox((0, 0), category.upper(), font=badge_font)
-    badge_w = (badge_bbox[2] - badge_bbox[0]) + 24
-    draw.rectangle([0, bar_y, badge_w, bar_y + badge_h], fill=(220, 30, 30))
-    draw.text(
-        (badge_w / 2, bar_y + badge_h / 2),
-        category.upper(),
-        font=badge_font,
-        fill=(255, 255, 255),
-        anchor="mm",
-    )
+    # Tier 2: Lower-third Headline Box
+    pad_x = max(20, int(w * 0.035))
+    pad_y = max(14, int(h * 0.024))
+    max_text_w = w - 2 * pad_x
+    max_total_ticker_h = int(h * 0.38)
+    max_headline_box_h = max_total_ticker_h - strip_h - 2 * pad_y
 
-    # Headline text in white
-    headline_font_size = max(18, int(bar_h * 0.38))
-    headline_font = load_font("sans", headline_font_size)
-    wrapped = wrap_text_to_width(headline, headline_font, w - 30, draw)
-    line_spacing = int(headline_font.size * 0.15)
+    base_font_size = max(20, int(w * 0.040))
+    min_font_size = max(13, int(w * 0.022))
 
-    text_start_y = bar_y + badge_h + 6
-    for line in wrapped[:2]:  # max 2 lines inside ticker
+    temp_img = Image.new("RGB", (100, 100))
+    temp_draw = ImageDraw.Draw(temp_img)
+
+    selected_font = None
+    selected_lines: list[str] = []
+    selected_spacing = 0
+
+    # Auto-scale font size: step down until headline fits in 2-3 lines comfortably
+    for size in range(base_font_size, min_font_size - 1, -1):
+        f = load_font("sans", size)
+        lines = wrap_text_to_width(headline, f, max_text_w, temp_draw)
+        spacing = max(4, int(size * 0.16))
+        _, th = calculate_multiline_box(lines, f, temp_draw, spacing)
+        if len(lines) <= 2 and th <= max_headline_box_h:
+            selected_font = f
+            selected_lines = lines
+            selected_spacing = spacing
+            break
+        if len(lines) <= 3 and size <= int(base_font_size * 0.8) and th <= max_headline_box_h:
+            selected_font = f
+            selected_lines = lines
+            selected_spacing = spacing
+            break
+
+    # If headline is exceptionally long even at min_font_size:
+    if not selected_font:
+        selected_font = load_font("sans", min_font_size)
+        selected_spacing = max(4, int(min_font_size * 0.16))
+        selected_lines = wrap_text_to_width(headline, selected_font, max_text_w, temp_draw)
+        if len(selected_lines) > 3:
+            selected_lines = selected_lines[:3]
+            while selected_lines[2] and (
+                temp_draw.textbbox((0, 0), selected_lines[2] + "…", font=selected_font)[2]
+                - temp_draw.textbbox((0, 0), selected_lines[2] + "…", font=selected_font)[0]
+                > max_text_w
+            ):
+                words = selected_lines[2].split()
+                if len(words) > 1:
+                    selected_lines[2] = " ".join(words[:-1])
+                else:
+                    selected_lines[2] = selected_lines[2][:-1]
+            selected_lines[2] = selected_lines[2].rstrip() + "…"
+
+    # Calculate exact dynamic height from wrapped lines
+    _, text_h = calculate_multiline_box(selected_lines, selected_font, temp_draw, selected_spacing)
+    headline_bar_h = text_h + 2 * pad_y
+    total_ticker_h = strip_h + headline_bar_h
+    strip_y = h - total_ticker_h
+
+    # 1. Dark lower-third background
+    draw.rectangle([0, strip_y + strip_h, w, h], fill=(18, 20, 26))
+
+    # 2. Red category header strip
+    draw.rectangle([0, strip_y, w, strip_y + strip_h], fill=(210, 25, 25))
+
+    # 3. TV broadcast golden divider line (2px)
+    draw.rectangle([0, strip_y + strip_h, w, strip_y + strip_h + 2], fill=(255, 204, 0))
+
+    # 4. Category badge text
+    draw.text((pad_x, strip_y + strip_h / 2), category.upper(), font=badge_font, fill=(255, 255, 255), anchor="lm")
+
+    # 5. Live broadcast indicator on the right (if category text leaves enough room)
+    cat_bbox = draw.textbbox((0, 0), category.upper(), font=badge_font)
+    cat_w = cat_bbox[2] - cat_bbox[0]
+    if cat_w < w * 0.6:
+        draw.text((w - pad_x, strip_y + strip_h / 2), "● ПРЯМОЙ ЭФИР", font=badge_font, fill=(255, 255, 255), anchor="rm")
+
+    # 6. Headline text lines (rendered with calculated vertical padding and spacing)
+    cur_y = strip_y + strip_h + pad_y
+    for line in selected_lines:
         if line:
-            draw.text((15, text_start_y), line, font=headline_font, fill=(255, 255, 255))
-        bbox = draw.textbbox((0, 0), line or "A", font=headline_font)
-        text_start_y += (bbox[3] - bbox[1]) + line_spacing
+            draw.text((pad_x, cur_y), line, font=selected_font, fill=(255, 255, 255))
+        bbox = draw.textbbox((0, 0), line or "A", font=selected_font)
+        cur_y += (bbox[3] - bbox[1]) + selected_spacing
 
     destination = resolve_output_path(output_path, prefix="news")
     img.save(destination, quality=95)

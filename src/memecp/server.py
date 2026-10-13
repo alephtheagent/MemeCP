@@ -14,6 +14,7 @@ from memecp.generator import (
     create_classic_meme as gen_classic_meme,
     create_demotivator as gen_demotivator,
     create_post_ironic_meme as gen_post_ironic_meme,
+    create_caption_meme as gen_caption_meme,
     create_news_meme as gen_news_meme,
     list_available_fonts as gen_list_fonts,
 )
@@ -96,6 +97,36 @@ def create_demotivator(
             image_source=image_source,
             title=title,
             subtitle=subtitle,
+            output_path=output_path,
+        )
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@mcp.tool()
+def create_caption_meme(
+    image_source: str,
+    caption: str,
+    font_name: str = "futura",
+    output_path: str | None = None,
+) -> dict[str, Any]:
+    """
+    Generate an esmBot / Discord / iFunny style white header caption box meme.
+
+    Args:
+        image_source: Local file path or direct HTTP/HTTPS URL.
+        caption: Caption text placed in the top white canvas box.
+        font_name: Bundled alias (default 'futura' for Futura Condensed, or 'sans', 'impact').
+        output_path: Destination path for the saved image. If None, saves to ~/.hermes/cache/memes/.
+
+    Returns:
+        dict with success (bool), path (str), width (int), height (int).
+    """
+    try:
+        return gen_caption_meme(
+            image_source=image_source,
+            caption=caption,
+            font_name=font_name,
             output_path=output_path,
         )
     except Exception as exc:
