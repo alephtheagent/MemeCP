@@ -6,12 +6,13 @@ import io
 import math
 import os
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import httpx
-from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageFilter, ImageSequence
 
 ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 DEFAULT_CACHE_DIR = Path("~/.hermes/cache/memes").expanduser()
@@ -62,6 +63,17 @@ FONT_DOWNLOAD_URLS: dict[str, list[str]] = {
         "https://raw.githubusercontent.com/google/fonts/main/ofl/notosans/NotoSans%5Bwdth%2Cwght%5D.ttf",
     ],
 }
+
+
+@dataclass
+class LoadedMedia:
+    """Container for loaded media frames, animation state, and playback metadata."""
+    is_animated: bool
+    frames: list[Image.Image]
+    durations: list[int]
+    loop: int
+    width: int
+    height: int
 
 
 def list_available_fonts() -> list[str]:
@@ -176,8 +188,37 @@ def load_font(font_name_or_path: str, size: int) -> ImageFont.FreeTypeFont:
         return ImageFont.load_default()
 
 
-def load_image(image_source: str, max_dimension: int = 1920) -> Image.Image:
-    """Load an image from a local path or HTTP(S) URL and convert to RGB."""
+def _prepare_frame(frame: Image.Image, max_dimension: int) -> Image.Image:
+    """Convert frame to RGB (compositing alpha on white) and downscale if max dimension exceeded."""
+    if frame.mode in ("RGBA", "LA") or (frame.mode == "P" and "transparency" in frame.info):
+        alpha_img = frame.convert("RGBA")
+        background = Image.new("RGBA", alpha_img.size, (255, 255, 255, 255))
+        composed = Image.alpha_composite(background, alpha_img)
+        rgb_frame = composed.convert("RGB")
+    elif frame.mode != "RGB":
+        rgb_frame = frame.convert("RGB")
+    else:
+        rgb_frame = frame.copy()
+
+    w, h = rgb_frame.size
+    if max(w, h) > max_dimension:
+        ratio = max_dimension / max(w, h)
+        new_w = max(1, int(w * ratio))
+        new_h = max(1, int(h * ratio))
+        rgb_frame = rgb_frame.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+    return rgb_frame
+
+
+def load_media(
+    image_source: str,
+    max_dimension: int = 1920,
+    max_gif_frames: int = 120,
+) -> LoadedMedia:
+    """
+    Load an image or animated GIF from a local path or HTTP(S) URL.
+    Preserves animated GIF frames, durations, and loop settings.
+    """
     if not image_source:
         raise ValueError("image_source must not be empty.")
 
@@ -187,45 +228,136 @@ def load_image(image_source: str, max_dimension: int = 1920) -> Image.Image:
             resp = client.get(image_source)
             resp.raise_for_status()
             image_data = resp.content
-        img = Image.open(io.BytesIO(image_data))
+        bio = io.BytesIO(image_data)
+        img = Image.open(bio)
     else:
         path = Path(image_source).expanduser().resolve()
         if not path.exists():
             raise FileNotFoundError(f"Local image file not found: {path}")
-        with Image.open(path) as opened:
-            img = opened.copy()
+        img = Image.open(path)
 
-    # Convert to RGB (composite RGBA on white background)
-    if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
-        alpha_img = img.convert("RGBA")
-        background = Image.new("RGBA", alpha_img.size, (255, 255, 255, 255))
-        composed = Image.alpha_composite(background, alpha_img)
-        img = composed.convert("RGB")
-    elif img.mode != "RGB":
-        img = img.convert("RGB")
+    is_animated = bool(getattr(img, "is_animated", False) and getattr(img, "n_frames", 1) > 1)
 
-    # Downscale if excessively large to maintain speed and manageable memory
-    w, h = img.size
-    if max(w, h) > max_dimension:
-        ratio = max_dimension / max(w, h)
-        new_w = max(1, int(w * ratio))
-        new_h = max(1, int(h * ratio))
-        img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    if not is_animated:
+        prepared = _prepare_frame(img, max_dimension)
+        return LoadedMedia(
+            is_animated=False,
+            frames=[prepared],
+            durations=[100],
+            loop=0,
+            width=prepared.width,
+            height=prepared.height,
+        )
 
-    return img
+    # Animated GIF processing
+    loop = int(img.info.get("loop", 0))
+    raw_frames: list[Image.Image] = []
+    durations: list[int] = []
+
+    for frame in ImageSequence.Iterator(img):
+        dur = int(frame.info.get("duration", 100) or 100)
+        if dur <= 10:
+            dur = 100
+        durations.append(dur)
+        raw_frames.append(_prepare_frame(frame, max_dimension))
+
+    if not raw_frames:
+        prepared = _prepare_frame(img, max_dimension)
+        return LoadedMedia(
+            is_animated=False,
+            frames=[prepared],
+            durations=[100],
+            loop=0,
+            width=prepared.width,
+            height=prepared.height,
+        )
+
+    # Gracefully sample if GIF has excessive frame count (> max_gif_frames)
+    if len(raw_frames) > max_gif_frames:
+        step = math.ceil(len(raw_frames) / max_gif_frames)
+        sampled_frames: list[Image.Image] = []
+        sampled_durations: list[int] = []
+        for i in range(0, len(raw_frames), step):
+            sampled_frames.append(raw_frames[i])
+            sampled_durations.append(sum(durations[i : min(i + step, len(durations))]))
+        raw_frames = sampled_frames
+        durations = sampled_durations
+
+    return LoadedMedia(
+        is_animated=True,
+        frames=raw_frames,
+        durations=durations,
+        loop=loop,
+        width=raw_frames[0].width,
+        height=raw_frames[0].height,
+    )
 
 
-def resolve_output_path(output_path: str | None, prefix: str = "meme") -> Path:
-    """Resolve or generate an output file path."""
+def load_image(image_source: str, max_dimension: int = 1920) -> Image.Image:
+    """Load an image from a local path or HTTP(S) URL and convert to RGB (first frame if animated)."""
+    media = load_media(image_source, max_dimension=max_dimension)
+    return media.frames[0]
+
+
+def resolve_output_path(output_path: str | None, prefix: str = "meme", is_gif: bool = False) -> Path:
+    """Resolve or generate an output file path with automatic GIF/JPG extension handling."""
+    ext = ".gif" if is_gif else ".jpg"
     if output_path:
         out = Path(output_path).expanduser().resolve()
+        if is_gif and out.suffix.lower() not in (".gif", ""):
+            out = out.with_suffix(".gif")
+        elif not out.suffix:
+            out = out.with_suffix(ext)
         out.parent.mkdir(parents=True, exist_ok=True)
         return out
 
     DEFAULT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     rand_id = uuid.uuid4().hex[:8]
-    return DEFAULT_CACHE_DIR / f"{prefix}_{ts}_{rand_id}.jpg prevail" if False else DEFAULT_CACHE_DIR / f"{prefix}_{ts}_{rand_id}.jpg"
+    return DEFAULT_CACHE_DIR / f"{prefix}_{ts}_{rand_id}{ext}"
+
+
+def save_media_result(
+    frames: list[Image.Image],
+    durations: list[int],
+    loop: int,
+    output_path: str | None,
+    prefix: str,
+    is_animated: bool,
+    quality: int = 95,
+) -> tuple[Path, int, int]:
+    """Save processed frames as static image or animated GIF with clean palette quantization."""
+    destination = resolve_output_path(output_path, prefix=prefix, is_gif=is_animated)
+
+    if is_animated and len(frames) > 1:
+        p_frames = [f.convert("P", palette=Image.ADAPTIVE) for f in frames]
+        p_frames[0].save(
+            destination,
+            format="GIF",
+            save_all=True,
+            append_images=p_frames[1:],
+            duration=durations,
+            loop=loop,
+            disposal=2,
+            optimize=False,
+        )
+    elif is_animated and len(frames) == 1:
+        p_frame = frames[0].convert("P", palette=Image.ADAPTIVE)
+        p_frame.save(
+            destination,
+            format="GIF",
+            save_all=True,
+            duration=durations[0] if durations else 100,
+            loop=loop,
+        )
+    else:
+        out_format = destination.suffix.lstrip(".").upper()
+        if out_format in ("JPG", "JPEG"):
+            frames[0].save(destination, format="JPEG", quality=quality)
+        else:
+            frames[0].save(destination, quality=quality)
+
+    return destination, frames[0].width, frames[0].height
 
 
 def wrap_text_to_width(text: str, font: ImageFont.FreeTypeFont, max_width: int, draw: ImageDraw.ImageDraw) -> list[str]:
@@ -336,15 +468,18 @@ def create_classic_meme(
 ) -> dict[str, Any]:
     """
     Generate a classic meme with white text and black outline (Impact font by default).
-    Automatically wraps lines and auto-scales font size to fit.
+    Automatically wraps lines, auto-scales font size, and supports animated GIFs.
     """
-    img = load_image(image_source)
-    draw = ImageDraw.Draw(img)
-    w, h = img.size
+    media = load_media(image_source)
+    w, h = media.width, media.height
 
     max_text_w = int(w * 0.92)
     max_section_h = int(h * 0.38)
     base_font_size = font_size if font_size > 0 else max(24, int(w * 0.085))
+
+    # Pre-render text overlay onto transparent canvas to composite across frames
+    overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
 
     # Process top text
     if top_text.strip():
@@ -402,14 +537,30 @@ def create_classic_meme(
             bbox = draw.textbbox((0, 0), line or "A", font=f_bot)
             cur_y += (bbox[3] - bbox[1]) + line_spacing
 
-    destination = resolve_output_path(output_path, prefix="classic")
-    img.save(destination, quality=95)
+    has_text = bool(top_text.strip() or bottom_text.strip())
+    output_frames: list[Image.Image] = []
+    for frame in media.frames:
+        if has_text:
+            frame_rgba = frame.convert("RGBA")
+            composed = Image.alpha_composite(frame_rgba, overlay).convert("RGB")
+            output_frames.append(composed)
+        else:
+            output_frames.append(frame)
+
+    destination, out_w, out_h = save_media_result(
+        frames=output_frames,
+        durations=media.durations,
+        loop=media.loop,
+        output_path=output_path,
+        prefix="classic",
+        is_animated=media.is_animated,
+    )
 
     return {
         "success": True,
         "path": str(destination),
-        "width": img.width,
-        "height": img.height,
+        "width": out_w,
+        "height": out_h,
     }
 
 
@@ -425,9 +576,10 @@ def create_demotivator(
     - Thin white rectangular border around original image
     - Large centered serif title
     - Smaller explanatory serif subtitle
+    Supports static images and animated GIFs.
     """
-    img = load_image(image_source)
-    orig_w, orig_h = img.size
+    media = load_media(image_source)
+    orig_w, orig_h = media.width, media.height
 
     margin_x = max(36, int(orig_w * 0.09))
     margin_top = max(36, int(orig_h * 0.08))
@@ -477,9 +629,8 @@ def create_demotivator(
         + margin_bottom
     )
 
-    canvas = Image.new("RGB", (canvas_w, canvas_h), (0, 0, 0))
-    canvas.paste(img, (margin_x, margin_top))
-    draw = ImageDraw.Draw(canvas)
+    base_canvas = Image.new("RGB", (canvas_w, canvas_h), (0, 0, 0))
+    draw = ImageDraw.Draw(base_canvas)
 
     # Thin white border around image (offset by 4px)
     border_gap = 4
@@ -510,14 +661,27 @@ def create_demotivator(
             bbox = draw.textbbox((0, 0), line or "A", font=font_sub)
             cur_y += (bbox[3] - bbox[1]) + line_spacing_sub
 
-    destination = resolve_output_path(output_path, prefix="demotivator")
-    canvas.save(destination, quality=95)
+    # Paste each frame onto base canvas
+    output_frames: list[Image.Image] = []
+    for frame in media.frames:
+        canvas = base_canvas.copy()
+        canvas.paste(frame, (margin_x, margin_top))
+        output_frames.append(canvas)
+
+    destination, out_w, out_h = save_media_result(
+        frames=output_frames,
+        durations=media.durations,
+        loop=media.loop,
+        output_path=output_path,
+        prefix="demotivator",
+        is_animated=media.is_animated,
+    )
 
     return {
         "success": True,
         "path": str(destination),
-        "width": canvas.width,
-        "height": canvas.height,
+        "width": out_w,
+        "height": out_h,
     }
 
 
@@ -533,9 +697,10 @@ def create_caption_meme(
     - Bold geometric sans typography (Futura Condensed Bold / Extra Bold)
     - Perfectly centered horizontally and vertically
     - Clean proportional padding
+    Supports static images and animated GIFs.
     """
-    img = load_image(image_source)
-    w, h = img.size
+    media = load_media(image_source)
+    w, h = media.width, media.height
 
     # Prominent geometric font sizing
     base_font_size = max(24, int(w * 0.072))
@@ -573,25 +738,38 @@ def create_caption_meme(
     pad_y = max(14, int(selected_font.size * 0.42))
     box_h = text_h + 2 * pad_y
 
-    canvas = Image.new("RGB", (w, h + box_h), (255, 255, 255))
-    canvas.paste(img, (0, box_h))
-
-    draw = ImageDraw.Draw(canvas)
+    # Pre-render the header box ONCE
+    header_img = Image.new("RGB", (w, box_h), (255, 255, 255))
+    header_draw = ImageDraw.Draw(header_img)
     cur_y = pad_y
     for line in selected_lines:
         if line:
-            draw.text((w / 2, cur_y), line, font=selected_font, fill=(0, 0, 0), anchor="ma")
-        bbox = draw.textbbox((0, 0), line or "A", font=selected_font)
+            header_draw.text((w / 2, cur_y), line, font=selected_font, fill=(0, 0, 0), anchor="ma")
+        bbox = header_draw.textbbox((0, 0), line or "A", font=selected_font)
         cur_y += (bbox[3] - bbox[1]) + selected_spacing
 
-    destination = resolve_output_path(output_path, prefix="caption")
-    canvas.save(destination, quality=95)
+    canvas_h = h + box_h
+    output_frames: list[Image.Image] = []
+    for frame in media.frames:
+        canvas = Image.new("RGB", (w, canvas_h), (255, 255, 255))
+        canvas.paste(header_img, (0, 0))
+        canvas.paste(frame, (0, box_h))
+        output_frames.append(canvas)
+
+    destination, out_w, out_h = save_media_result(
+        frames=output_frames,
+        durations=media.durations,
+        loop=media.loop,
+        output_path=output_path,
+        prefix="caption",
+        is_animated=media.is_animated,
+    )
 
     return {
         "success": True,
         "path": str(destination),
-        "width": canvas.width,
-        "height": canvas.height,
+        "width": out_w,
+        "height": out_h,
     }
 
 
@@ -606,9 +784,8 @@ def create_post_ironic_meme(
     - 'caption_box': White rectangular header box above image (esmBot / iFunny format).
     - 'deep_fry': Nuked meme with hyper-saturation, sharpness, contrast, and JPEG compression artifacts.
     - 'bottom_ticker': Breaking news ticker overlay at the bottom.
+    Supports static images and animated GIFs.
     """
-    img = load_image(image_source)
-    w, h = img.size
     norm_style = style.strip().lower()
 
     if norm_style in ("caption_box", "top_box", "ifunny", "esmbot", "caption"):
@@ -618,7 +795,8 @@ def create_post_ironic_meme(
         return create_news_meme(image_source=image_source, headline=caption, output_path=output_path)
 
     elif norm_style in ("deep_fry", "fried", "nuked"):
-        # If caption given, render it as classic meme before frying
+        source_to_fry = image_source
+        temp_created = None
         if caption.strip():
             temp_res = create_classic_meme(
                 image_source=image_source,
@@ -626,51 +804,65 @@ def create_post_ironic_meme(
                 all_caps=True,
                 font_name="impact",
             )
-            with Image.open(temp_res["path"]) as opened:
-                fry_img = opened.convert("RGB")
-            try:
-                os.remove(temp_res["path"])
-            except OSError:
-                pass
-        else:
-            fry_img = img.copy()
+            source_to_fry = temp_res["path"]
+            temp_created = temp_res["path"]
 
-        # 1. Extreme saturation
-        fry_img = ImageEnhance.Color(fry_img).enhance(2.8)
-        # 2. Extreme contrast
-        fry_img = ImageEnhance.Contrast(fry_img).enhance(2.2)
-        # 3. Extreme sharpness
-        fry_img = ImageEnhance.Sharpness(fry_img).enhance(3.5)
-        # 4. First heavy JPEG compression pass
-        buf = io.BytesIO()
-        fry_img.save(buf, format="JPEG", quality=15)
-        buf.seek(0)
-        fry_img = Image.open(buf).convert("RGB")
+        try:
+            media = load_media(source_to_fry)
+            output_frames: list[Image.Image] = []
 
-        # 5. Red/yellow color temperature bias
-        r, g, b = fry_img.split()
-        r = r.point(lambda i: min(255, int(i * 1.2 + 10)))
-        b = b.point(lambda i: max(0, int(i * 0.85 - 10)))
-        fry_img = Image.merge("RGB", (r, g, b))
+            for frame in media.frames:
+                fry_img = frame.copy()
+                # 1. Extreme saturation
+                fry_img = ImageEnhance.Color(fry_img).enhance(2.8)
+                # 2. Extreme contrast
+                fry_img = ImageEnhance.Contrast(fry_img).enhance(2.2)
+                # 3. Extreme sharpness
+                fry_img = ImageEnhance.Sharpness(fry_img).enhance(3.5)
+                # 4. First heavy JPEG compression pass
+                buf = io.BytesIO()
+                fry_img.save(buf, format="JPEG", quality=15)
+                buf.seek(0)
+                fry_img = Image.open(buf).convert("RGB")
 
-        # 6. Second JPEG compression pass
-        buf2 = io.BytesIO()
-        fry_img.save(buf2, format="JPEG", quality=18)
-        buf2.seek(0)
-        result_img = Image.open(buf2).convert("RGB")
+                # 5. Red/yellow color temperature bias
+                r, g, b = fry_img.split()
+                r = r.point(lambda i: min(255, int(i * 1.2 + 10)))
+                b = b.point(lambda i: max(0, int(i * 0.85 - 10)))
+                fry_img = Image.merge("RGB", (r, g, b))
+
+                # 6. Second JPEG compression pass
+                buf2 = io.BytesIO()
+                fry_img.save(buf2, format="JPEG", quality=18)
+                buf2.seek(0)
+                result_img = Image.open(buf2).convert("RGB")
+                output_frames.append(result_img)
+
+            destination, out_w, out_h = save_media_result(
+                frames=output_frames,
+                durations=media.durations,
+                loop=media.loop,
+                output_path=output_path,
+                prefix="post_deep_fry",
+                is_animated=media.is_animated,
+                quality=25,
+            )
+
+            return {
+                "success": True,
+                "path": str(destination),
+                "width": out_w,
+                "height": out_h,
+            }
+        finally:
+            if temp_created:
+                try:
+                    os.remove(temp_created)
+                except OSError:
+                    pass
 
     else:
         raise ValueError(f"Unknown post-ironic style: '{style}'. Supported: 'caption_box', 'deep_fry', 'bottom_ticker'.")
-
-    destination = resolve_output_path(output_path, prefix=f"post_{norm_style}")
-    result_img.save(destination, quality=95 if norm_style != "deep_fry" else 25)
-
-    return {
-        "success": True,
-        "path": str(destination),
-        "width": result_img.width,
-        "height": result_img.height,
-    }
 
 
 def create_news_meme(
@@ -684,11 +876,10 @@ def create_news_meme(
     Uses two-tier TV lower-third layout with dynamic font scaling and multiline spacing:
     - Tier 1: Red category strip with category badge and live broadcast indicator
     - Tier 2: Dark lower-third bar sized dynamically to fit all headline lines without clipping
+    Supports static images and animated GIFs.
     """
-    img = load_image(image_source)
-    w, h = img.size
-
-    draw = ImageDraw.Draw(img)
+    media = load_media(image_source)
+    w, h = media.width, media.height
 
     # Tier 1: Top Category Strip
     badge_font_size = max(14, int(w * 0.024))
@@ -754,38 +945,55 @@ def create_news_meme(
     total_ticker_h = strip_h + headline_bar_h
     strip_y = h - total_ticker_h
 
+    # Pre-render the ticker overlay ONCE
+    ticker_img = Image.new("RGB", (w, total_ticker_h))
+    ticker_draw = ImageDraw.Draw(ticker_img)
+
     # 1. Dark lower-third background
-    draw.rectangle([0, strip_y + strip_h, w, h], fill=(18, 20, 26))
+    ticker_draw.rectangle([0, strip_h, w, total_ticker_h], fill=(18, 20, 26))
 
     # 2. Red category header strip
-    draw.rectangle([0, strip_y, w, strip_y + strip_h], fill=(210, 25, 25))
+    ticker_draw.rectangle([0, 0, w, strip_h], fill=(210, 25, 25))
 
     # 3. TV broadcast golden divider line (2px)
-    draw.rectangle([0, strip_y + strip_h, w, strip_y + strip_h + 2], fill=(255, 204, 0))
+    ticker_draw.rectangle([0, strip_h, w, strip_h + 2], fill=(255, 204, 0))
 
     # 4. Category badge text
-    draw.text((pad_x, strip_y + strip_h / 2), category.upper(), font=badge_font, fill=(255, 255, 255), anchor="lm")
+    ticker_draw.text((pad_x, strip_h / 2), category.upper(), font=badge_font, fill=(255, 255, 255), anchor="lm")
 
-    # 5. Live broadcast indicator on the right (if category text leaves enough room)
-    cat_bbox = draw.textbbox((0, 0), category.upper(), font=badge_font)
+    # 5. Live broadcast indicator on the right
+    cat_bbox = ticker_draw.textbbox((0, 0), category.upper(), font=badge_font)
     cat_w = cat_bbox[2] - cat_bbox[0]
     if cat_w < w * 0.6:
-        draw.text((w - pad_x, strip_y + strip_h / 2), "● ПРЯМОЙ ЭФИР", font=badge_font, fill=(255, 255, 255), anchor="rm")
+        ticker_draw.text((w - pad_x, strip_h / 2), "● ПРЯМОЙ ЭФИР", font=badge_font, fill=(255, 255, 255), anchor="rm")
 
-    # 6. Headline text lines (rendered with calculated vertical padding and spacing)
-    cur_y = strip_y + strip_h + pad_y
+    # 6. Headline text lines
+    cur_y = strip_h + pad_y
     for line in selected_lines:
         if line:
-            draw.text((pad_x, cur_y), line, font=selected_font, fill=(255, 255, 255))
-        bbox = draw.textbbox((0, 0), line or "A", font=selected_font)
+            ticker_draw.text((pad_x, cur_y), line, font=selected_font, fill=(255, 255, 255))
+        bbox = ticker_draw.textbbox((0, 0), line or "A", font=selected_font)
         cur_y += (bbox[3] - bbox[1]) + selected_spacing
 
-    destination = resolve_output_path(output_path, prefix="news")
-    img.save(destination, quality=95)
+    # Apply ticker overlay to each frame
+    output_frames: list[Image.Image] = []
+    for frame in media.frames:
+        frame_copy = frame.copy()
+        frame_copy.paste(ticker_img, (0, strip_y))
+        output_frames.append(frame_copy)
+
+    destination, out_w, out_h = save_media_result(
+        frames=output_frames,
+        durations=media.durations,
+        loop=media.loop,
+        output_path=output_path,
+        prefix="news",
+        is_animated=media.is_animated,
+    )
 
     return {
         "success": True,
         "path": str(destination),
-        "width": img.width,
-        "height": img.height,
+        "width": out_w,
+        "height": out_h,
     }

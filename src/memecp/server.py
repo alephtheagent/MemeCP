@@ -21,7 +21,7 @@ from memecp.generator import (
 
 mcp = FastMCP(
     "memecp",
-    instructions="MemeCP: FastMCP Server for generating classic Impact memes, Russian demotivators, and post-ironic formats on demand.",
+    instructions="MemeCP: FastMCP Server for generating classic Impact memes, Russian demotivators, caption boxes, and post-ironic formats on demand with full static image and animated GIF support.",
 )
 
 
@@ -40,9 +40,10 @@ def create_classic_meme(
 ) -> dict[str, Any]:
     """
     Generate a classic top/bottom text meme with black outline (Impact font default).
+    Supports static images and animated GIFs (outputs animated .gif).
 
     Args:
-        image_source: Local file path or direct HTTP/HTTPS URL.
+        image_source: Local file path or direct HTTP/HTTPS URL (supports JPG, PNG, animated GIF).
         top_text: Text placed at the top (auto-wrapped and auto-sized).
         bottom_text: Text placed at the bottom (auto-wrapped and auto-sized).
         font_name: Font to use ('impact', 'lobster', 'oswald', 'serif', 'sans', or file path).
@@ -51,7 +52,7 @@ def create_classic_meme(
         text_color: Text fill color (default 'white').
         stroke_color: Outline stroke color (default 'black').
         all_caps: Whether to convert text to UPPERCASE (default True).
-        output_path: Destination path for the saved image. If None, saves to ~/.hermes/cache/memes/.
+        output_path: Destination path for saved image (.gif automatically if source is animated GIF).
 
     Returns:
         dict with success (bool), path (str), width (int), height (int).
@@ -82,12 +83,13 @@ def create_demotivator(
 ) -> dict[str, Any]:
     """
     Generate a classic Russian 2007-style demotivator.
+    Supports static images and animated GIFs (outputs animated .gif).
 
     Args:
-        image_source: Local file path or direct HTTP/HTTPS URL.
+        image_source: Local file path or direct HTTP/HTTPS URL (supports JPG, PNG, animated GIF).
         title: Large serif title centered below the framed image.
         subtitle: Explanatory smaller serif subtitle.
-        output_path: Destination path for the saved image. If None, saves to ~/.hermes/cache/memes/.
+        output_path: Destination path for saved image (.gif automatically if source is animated GIF).
 
     Returns:
         dict with success (bool), path (str), width (int), height (int).
@@ -112,12 +114,13 @@ def create_caption_meme(
 ) -> dict[str, Any]:
     """
     Generate an esmBot / Discord / iFunny style white header caption box meme.
+    Supports static images and animated GIFs (outputs animated .gif).
 
     Args:
-        image_source: Local file path or direct HTTP/HTTPS URL.
+        image_source: Local file path or direct HTTP/HTTPS URL (supports JPG, PNG, animated GIF).
         caption: Caption text placed in the top white canvas box.
         font_name: Bundled alias (default 'futura' for Futura Condensed, or 'sans', 'impact').
-        output_path: Destination path for the saved image. If None, saves to ~/.hermes/cache/memes/.
+        output_path: Destination path for saved image (.gif automatically if source is animated GIF).
 
     Returns:
         dict with success (bool), path (str), width (int), height (int).
@@ -142,12 +145,13 @@ def create_post_ironic_meme(
 ) -> dict[str, Any]:
     """
     Generate post-ironic and modern memes (top caption box, deep-fry, or bottom ticker).
+    Supports static images and animated GIFs (outputs animated .gif).
 
     Args:
-        image_source: Local file path or direct HTTP/HTTPS URL.
+        image_source: Local file path or direct HTTP/HTTPS URL (supports JPG, PNG, animated GIF).
         caption: Caption text or headline.
         style: Meme style ('caption_box', 'deep_fry', 'bottom_ticker').
-        output_path: Destination path for the saved image. If None, saves to ~/.hermes/cache/memes/.
+        output_path: Destination path for saved image (.gif automatically if source is animated GIF).
 
     Returns:
         dict with success (bool), path (str), width (int), height (int).
@@ -172,12 +176,13 @@ def create_news_meme(
 ) -> dict[str, Any]:
     """
     Generate a breaking news ticker overlay at the bottom of the image.
+    Supports static images and animated GIFs (outputs animated .gif).
 
     Args:
-        image_source: Local file path or direct HTTP/HTTPS URL.
+        image_source: Local file path or direct HTTP/HTTPS URL (supports JPG, PNG, animated GIF).
         headline: Main news headline text.
         category: News category tag (default '⚡ СРОЧНО').
-        output_path: Destination path for the saved image. If None, saves to ~/.hermes/cache/memes/.
+        output_path: Destination path for saved image (.gif automatically if source is animated GIF).
 
     Returns:
         dict with success (bool), path (str), width (int), height (int).
