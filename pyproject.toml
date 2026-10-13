@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "memecp"
+version = "0.1.0"
+description = "FastMCP Server for generating classic & post-ironic memes"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Aleph the Agent", email = "ilya2accpidor@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=2.0.0",
+    "pillow>=10.0.0",
+    "httpx>=0.25.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+memecp = "memecp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"memecp.assets" = ["*.ttf"]
